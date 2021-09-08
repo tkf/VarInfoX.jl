@@ -44,6 +44,92 @@ function varinfo_seq(
     return rows
 end
 
+function varinfo_pr42123(
+    m::Module = Main,
+    pattern::Regex = r"";
+    all::Bool = false,
+    imported::Bool = false,
+    recursive::Bool = false,
+)
+    workqueue = [(m, "")]
+    tasks = Task[]
+    while !isempty(workqueue)
+        m2, prep = popfirst!(workqueue)
+        for v in names(m2; all, imported)
+            if !isdefined(m2, v) || !occursin(pattern, string(v))
+                continue
+            end
+            value = getfield(m2, v)
+            isbuiltin = value === Base || value === Main || value === Core
+            if (
+                recursive &&
+                !isbuiltin &&
+                isa(value, Module) &&
+                value !== m2 &&
+                nameof(value) === v &&
+                parentmodule(value) === m2
+            )
+                push!(workqueue, (value, "$prep$v."))
+            end
+            task = Threads.@spawn begin
+                ssize_str, ssize = if isbuiltin
+                    ("", typemax(Int))
+                else
+                    ss = summarysize(value)
+                    (format_bytes(ss), ss)
+                end
+                return Any[string(prep, v), ssize_str, summary(value), ssize]
+            end
+            push!(tasks, task)
+        end
+    end
+    return map(fetch, tasks)
+end
+
+function varinfo_dac_names(
+    m::Module = Main,
+    pattern::Regex = r"";
+    all::Bool = false,
+    imported::Bool = false,
+    recursive::Bool = false,
+    basesize::Integer = 4,
+)
+    function rows_of(m2::Module, prep::String)
+        tasks = map(Iterators.partition(names(m2; all, imported), basesize)) do vs
+            Threads.@spawn begin
+                local rows = Vector{Any}[]
+                for v in vs
+                    if !isdefined(m2, v) || !occursin(pattern, string(v))
+                        continue
+                    end
+                    value = getfield(m2, v)
+                    isbuiltin = value === Base || value === Main || value === Core
+                    if (
+                        recursive &&
+                        !isbuiltin &&
+                        isa(value, Module) &&
+                        value !== m2 &&
+                        nameof(value) === v &&
+                        parentmodule(value) === m2
+                    )
+                        append!(rows, rows_of(value, "$prep$v."))
+                    end
+                    ssize_str, ssize = if isbuiltin
+                        ("", typemax(Int))
+                    else
+                        ss = summarysize(value)
+                        (format_bytes(ss), ss)
+                    end
+                    push!(rows, Any[string(prep, v), ssize_str, summary(value), ssize])
+                end
+                return rows
+            end
+        end
+        return mapfoldl(fetch, append!, tasks; init = Vector{Any}[])
+    end
+    return rows_of(m, "")
+end
+
 function varinfo_dac_module(
     m::Module = Main,
     pattern::Regex = r"";
